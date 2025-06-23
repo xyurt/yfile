@@ -183,6 +183,81 @@ extern "C" {
         return DeleteFileA(filename) ? 0 : -1;
     }
 
+    // Sets the file offset for the given FILE pointer using a custom origin and 64-bit offset.
+    // 
+    // @param fp     A valid file pointer.
+    // @param offset 64-bit offset value. Must be non-negative if SEEK_SET is used.
+    // @param origin Can be SEEK_SET, SEEK_CUR, or SEEK_END.
+    // @return 0 on success, -1 on failure.
+    int file_set_offset_ex(FILE *fp, int64_t offset, int origin) {
+        // Validate input: disallow negative offset with SEEK_SET, check null pointer.
+        if ((origin != SEEK_CUR && origin != SEEK_END && (origin != SEEK_SET || offset < 0)) || fp == NULL)
+            return -1;
+
+        // Use _fseeki64 for 64-bit file offset support.
+        return _fseeki64(fp, offset, origin) != 0 ? -1 : 0;
+    }
+
+    // Sets the file offset absolutely (from beginning of the file).
+    //
+    // @param fp     A valid file pointer.
+    // @param offset Absolute offset from the beginning. Must be >= 0.
+    // @return 0 on success, -1 on failure.
+    int file_set_offset(FILE *fp, int64_t offset) {
+        if (offset < 0) return -1;
+        return file_set_offset_ex(fp, offset, SEEK_SET);
+    }
+
+    // Gets the current 64-bit file offset of the provided FILE pointer.
+    //
+    // @param fp A valid file pointer.
+    // @return Current offset as int64_t, or -1 on error.
+    int64_t file_get_offset(FILE *fp) {
+        if (fp == NULL) return -1LL;
+        return _ftelli64(fp);
+    }
+
+    // Writes a buffer to the file with 64-bit safety and handles partial writes.
+    //
+    // @param fp   A valid file pointer opened for writing.
+    // @param buf  Pointer to the data buffer to write.
+    // @param len  Number of bytes to write.
+    // @return Number of bytes written; returns 0 on failure.
+    size_t file_write(FILE *fp, const char *buf, size_t len) {
+        if (fp == NULL || buf == NULL || len == 0) return 0;
+
+        size_t total = 0;
+
+        // Write in a loop to handle partial writes (especially relevant for pipes or slow I/O).
+        while (total < len) {
+            size_t written = fwrite(buf + total, sizeof(char), len - total, fp);
+
+            // fwrite returns 0 on error or if no data was written
+            if (written == 0) {
+                if (ferror(fp)) {
+                    return 0;
+                }
+                break;
+            }
+
+            total += written;
+        }
+
+        return total;
+    }
+
+    // Reads up to max_len bytes from a file into a buffer.
+    //
+    // @param fp      A valid file pointer opened for reading.
+    // @param buf     Destination buffer where read data will be stored.
+    // @param max_len Maximum number of bytes to read.
+    // @return Number of bytes successfully read; returns 0 on error.
+    size_t file_read(FILE *fp, char *buf, size_t max_len) {
+        if (fp == NULL || buf == NULL || max_len == 0) return 0;
+        size_t read = fread(buf, 1, max_len, fp);
+        if (ferror(fp)) return 0;
+        return read;
+    }
     /**
      * @brief Gets the last WinAPI error.
      * @return Error code.
