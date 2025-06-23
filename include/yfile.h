@@ -180,6 +180,53 @@ extern "C" {
         return DeleteFileA(filename) ? 0 : -1;
     }
 
+    // Returns the current file offset in bytes or -1 on failure.
+    int64_t file_get_offset(FILE *fp) {
+        if (fp == NULL) { return -1LL; }
+        return _ftelli64(fp);
+    }
+
+    // Writes a buffer to the file with 64-bit safety and handles partial writes.
+    //
+    // @param fp   A valid file pointer opened for writing.
+    // @param buf  Pointer to the data buffer to write.
+    // @param len  Number of bytes to write.
+    // @return Number of bytes written; returns 0 on failure.
+    size_t file_write(FILE *fp, const char *buf, size_t len) {
+        if (fp == NULL || buf == NULL || len == 0) return 0;
+
+        size_t total = 0;
+
+        // Write in a loop to handle partial writes (especially relevant for pipes or slow I/O).
+        while (total < len) {
+            size_t written = fwrite(buf + total, sizeof(char), len - total, fp);
+
+            // fwrite returns 0 on error or if no data was written
+            if (written == 0) {
+                if (ferror(fp)) {
+                    return 0;
+                }
+                break;
+            }
+
+            total += written;
+        }
+
+        return total;
+    }
+
+    // Gets the total size of the file in bytes or -1 on failure.
+    // It saves the current position, seeks to end to get size, then restores position.
+    int64_t file_get_size(FILE *fp) {
+        if (fp == NULL) { return -1; }
+        int64_t current, size;
+        if ((current = file_get_offset(fp)) == -1) { return -1; }
+        if (file_set_offset_ex(fp, 0, SEEK_END) != 0) { return -1; }
+        if ((size = file_get_offset(fp)) == -1) { return -1; }
+        if (file_set_offset(fp, current) != 0) { return -1; }
+        return size;
+    }
+
     // Securely deletes a file by overwriting its contents with zeros before deleting it.
     // buffer_length specifies the size of the buffer used for writing zeros in chunks.
     // Returns 0 on success, -1 on failure.
@@ -269,24 +316,6 @@ extern "C" {
         return file_set_offset_ex(fp, offset, SEEK_SET);
     }
 
-    // Returns the current file offset in bytes or -1 on failure.
-    int64_t file_get_offset(FILE *fp) {
-        if (fp == NULL) { return -1LL; }
-        return _ftelli64(fp);
-    }
-
-    // Gets the total size of the file in bytes or -1 on failure.
-    // It saves the current position, seeks to end to get size, then restores position.
-    int64_t file_get_size(FILE *fp) {
-        if (fp == NULL) { return -1; }
-        int64_t current, size;
-        if ((current = file_get_offset(fp)) == -1) { return -1; }
-        if (file_set_offset_ex(fp, 0, SEEK_END) != 0) { return -1; }
-        if ((size = file_get_offset(fp)) == -1) { return -1; }
-        if (file_set_offset(fp, current) != 0) { return -1; }
-        return size;
-    }
-
     // Resets file pointer to beginning using standard rewind.
     // Void because no return value needed.
     void file_rewind(FILE *fp) {
@@ -363,7 +392,7 @@ extern "C" {
 
         // If directory already exists, treat as success.
         if (ret != 0) {
-            if (file_last_error_is(ERROR_ALREADY_EXISTS)) {
+            if (file_last_error_is(ERROR_ALREADY_EXISTS) == 0) {
                 return 0;
             }
             return -1;
@@ -376,35 +405,6 @@ extern "C" {
     int file_flush(FILE *fp) {
         if (fp == NULL) return -1;
         return fflush(fp);
-    }
-
-    // Writes a buffer to the file with 64-bit safety and handles partial writes.
-    //
-    // @param fp   A valid file pointer opened for writing.
-    // @param buf  Pointer to the data buffer to write.
-    // @param len  Number of bytes to write.
-    // @return Number of bytes written; returns 0 on failure.
-    size_t file_write(FILE *fp, const char *buf, size_t len) {
-        if (fp == NULL || buf == NULL || len == 0) return 0;
-
-        size_t total = 0;
-
-        // Write in a loop to handle partial writes (especially relevant for pipes or slow I/O).
-        while (total < len) {
-            size_t written = fwrite(buf + total, sizeof(char), len - total, fp);
-
-            // fwrite returns 0 on error or if no data was written
-            if (written == 0) {
-                if (ferror(fp)) {
-                    return 0;
-                }
-                break;
-            }
-
-            total += written;
-        }
-
-        return total;
     }
 
     // Reads up to max_len bytes from a file into a buffer.
