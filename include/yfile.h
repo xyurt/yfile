@@ -174,47 +174,208 @@ extern "C" {
         return MoveFileA(src, dst) ? 0 : -1;
     }
 
-    /**
-     * @brief Deletes a file.
-     * @param filename File path.
-     * @return 0 on success, -1 on failure.
-     */
+    // Deletes the file specified by filename.
+    // Returns 0 on success, -1 on failure.
     int file_delete(const char *filename) {
         return DeleteFileA(filename) ? 0 : -1;
     }
 
-    // Sets the file offset for the given FILE pointer using a custom origin and 64-bit offset.
-    // 
-    // @param fp     A valid file pointer.
-    // @param offset 64-bit offset value. Must be non-negative if SEEK_SET is used.
-    // @param origin Can be SEEK_SET, SEEK_CUR, or SEEK_END.
-    // @return 0 on success, -1 on failure.
-    int file_set_offset_ex(FILE *fp, int64_t offset, int origin) {
-        // Validate input: disallow negative offset with SEEK_SET, check null pointer.
-        if ((origin != SEEK_CUR && origin != SEEK_END && (origin != SEEK_SET || offset < 0)) || fp == NULL)
-            return -1;
+    // Securely deletes a file by overwriting its contents with zeros before deleting it.
+    // buffer_length specifies the size of the buffer used for writing zeros in chunks.
+    // Returns 0 on success, -1 on failure.
+    int file_secure_delete_ex(const char *filename, size_t buffer_length) {
+        if (filename == NULL) { return -1; }
 
-        // Use _fseeki64 for 64-bit file offset support.
+        // Open file for read/write binary, using UTF-8 aware open (you presumably have this function).
+        FILE *fp = file_open_utf8(filename, "r+b");
+        if (fp == NULL) { return -1; }
+
+        // Get the size of the file for overwriting.
+        int64_t filesz64 = file_get_size(fp);
+        if (filesz64 < 0) { file_close(fp); return -1; }
+
+        // If file is empty, just close and delete it.
+        if (filesz64 == 0) { file_close(fp); file_delete(filename); return 0; }
+
+        // Safely cast file size to size_t (assuming file < 4GB or 64-bit size_t).
+        size_t filesz = (size_t)filesz64;
+
+        // Buffer size to use for zeroing out the file.
+        size_t buflen = filesz > buffer_length ? buffer_length : filesz;
+
+        // Allocate a buffer filled with zeros.
+        char *tempbuf = (char *)malloc(sizeof(char) * buflen);
+        if (tempbuf == NULL) { file_close(fp); return -1; }
+        memset(tempbuf, 0, buflen);
+
+        // Calculate how many full chunks we need to write.
+        size_t loopcount = (size_t)(filesz / buflen);
+
+        // Reset file pointer to beginning.
+        if (file_set_offset(fp, 0) != 0) { free(tempbuf); file_close(fp); return -1; }
+
+        // Overwrite file chunk by chunk with zeros.
+        for (size_t i = 0; i < loopcount; i++) {
+            // file_write returns 0 on failure, so if that happens return -1.
+            if (file_write(fp, tempbuf, buflen) == 0) {
+                free(tempbuf);
+                file_close(fp);
+                return -1;
+            }
+        }
+        free(tempbuf);
+
+        // Handle remaining bytes if file size not divisible by buffer length.
+        size_t remainingbytes = filesz - (loopcount * buflen);
+        if (remainingbytes > 0) {
+            // Allocate smaller buffer for remaining bytes.
+            char *tempbuf_rem = (char *)malloc(sizeof(char) * remainingbytes);
+            if (tempbuf_rem == NULL) { file_close(fp); return -1; }
+            memset(tempbuf_rem, 0, remainingbytes);
+
+            // Write the remaining zero bytes.
+            if (file_write(fp, tempbuf_rem, remainingbytes) == 0) {
+                free(tempbuf_rem);
+                file_close(fp);
+                return -1;
+            }
+            free(tempbuf_rem);
+        }
+
+        // Flush buffer to disk to ensure data is written.
+        if (file_flush(fp) != 0) { file_close(fp); return -1; }
+
+        // Close the file.
+        if (file_close(fp) == -1) { return -1; }
+
+        // Finally delete the file after overwriting.
+        return file_delete(filename);
+    }
+
+    // Sets the file position of the given FILE* fp to offset relative to origin (SEEK_SET, SEEK_CUR, SEEK_END).
+    // Returns 0 on success, -1 on failure.
+    int file_set_offset_ex(FILE *fp, int64_t offset, int origin) {
+        // Check valid origin and fp not NULL.
+        if ((origin != SEEK_CUR && origin != SEEK_END && (origin != SEEK_SET || offset < 0)) || fp == NULL) { return -1; }
+
+        // _fseeki64 is Windows-specific 64-bit file seek function.
         return _fseeki64(fp, offset, origin) != 0 ? -1 : 0;
     }
 
-    // Sets the file offset absolutely (from beginning of the file).
-    //
-    // @param fp     A valid file pointer.
-    // @param offset Absolute offset from the beginning. Must be >= 0.
-    // @return 0 on success, -1 on failure.
+    // Sets file offset to an absolute position offset bytes from start (SEEK_SET).
+    // Returns 0 on success, -1 on failure.
     int file_set_offset(FILE *fp, int64_t offset) {
-        if (offset < 0) return -1;
+        if (offset < 0) { return -1; }
         return file_set_offset_ex(fp, offset, SEEK_SET);
     }
 
-    // Gets the current 64-bit file offset of the provided FILE pointer.
-    //
-    // @param fp A valid file pointer.
-    // @return Current offset as int64_t, or -1 on error.
+    // Returns the current file offset in bytes or -1 on failure.
     int64_t file_get_offset(FILE *fp) {
-        if (fp == NULL) return -1LL;
+        if (fp == NULL) { return -1LL; }
         return _ftelli64(fp);
+    }
+
+    // Gets the total size of the file in bytes or -1 on failure.
+    // It saves the current position, seeks to end to get size, then restores position.
+    int64_t file_get_size(FILE *fp) {
+        if (fp == NULL) { return -1; }
+        int64_t current, size;
+        if ((current = file_get_offset(fp)) == -1) { return -1; }
+        if (file_set_offset_ex(fp, 0, SEEK_END) != 0) { return -1; }
+        if ((size = file_get_offset(fp)) == -1) { return -1; }
+        if (file_set_offset(fp, current) != 0) { return -1; }
+        return size;
+    }
+
+    // Resets file pointer to beginning using standard rewind.
+    // Void because no return value needed.
+    void file_rewind(FILE *fp) {
+        if (fp == NULL) { return; }
+        rewind(fp);
+    }
+
+    // Returns non-zero if end-of-file has been reached, zero otherwise.
+    // Returns 1 if fp is NULL (considered EOF for safety).
+    int file_eof(FILE *fp) {
+        if (fp == NULL) { return 1; }
+        return feof(fp);
+    }
+
+    // Truncates or extends the file to specified size in bytes.
+    // Returns 0 on success, -1 on failure.
+    // Uses Windows HANDLE from FILE* for SetEndOfFile API.
+    int file_truncate(FILE *fp, int64_t size) {
+        if (fp == NULL) { return -1; }
+        HANDLE h;
+        if ((h = file_get_handle(fp)) == INVALID_HANDLE_VALUE) { return -1; }
+        if (file_set_offset(fp, size) != 0) { return -1; }
+        return SetEndOfFile(h) ? 0 : -1;
+    }
+
+    // Checks if given filename is a directory.
+    // Returns 0 if directory, 1 if not, -1 on error (like file not existing).
+    int file_is_directory(const char *filename) {
+        if (filename == NULL) { return -1; }
+        return file_has_attributes(filename, FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    // Creates a directory specified by partial_path with optional security attributes.
+    // Returns 0 if directory created successfully, 1 if failed (or directory exists?).
+    int create_directory_part_ex(const char *partial_path, LPSECURITY_ATTRIBUTES attributes) {
+        return CreateDirectoryA(partial_path, attributes) != 0 ? 0 : 1;
+    }
+
+    // Wrapper for create_directory_part_ex without security attributes.
+    int create_directory_part(const char *partial_path) {
+        return create_directory_part_ex(partial_path, NULL);
+    }
+
+    // Ensures that the entire directory path exists by creating any missing directories.
+    // Returns 0 on success, -1 on failure.
+    // Supports paths like "C:\\folder1\\folder2\\folder3"
+    int file_ensure_directory_ex(const char *path, LPSECURITY_ATTRIBUTES attributes) {
+        if (path == NULL || path[0] == '\0') { return -1; }
+
+        // Copy path to mutable buffer.
+        size_t pathlen = strlen(path);
+        char *tmp = (char *)malloc(sizeof(char) * (pathlen + 1));
+        if (tmp == NULL) { return -1; }
+        memcpy(tmp, path, pathlen);
+        tmp[pathlen] = '\0';
+
+        // Remove trailing slash/backslash if exists.
+        if (tmp[pathlen - 1] == '\\' || tmp[pathlen - 1] == '/') {
+            tmp[pathlen - 1] = '\0';
+        }
+
+        // Iterate through tmp string, create directories progressively.
+        for (char *p = tmp + 1; *p; ++p) {
+            if (*p != '\\' && *p != '/') { continue; }
+            *p = '\0';                          // Temporarily terminate string here.
+            create_directory_part_ex(tmp, attributes);  // Create directory if missing.
+            *p = '\\';                         // Restore slash.
+        }
+
+        // Finally create last directory in path.
+        int ret = create_directory_part(tmp);
+
+        free(tmp);
+
+        // If directory already exists, treat as success.
+        if (ret != 0) {
+            if (file_last_error_is(ERROR_ALREADY_EXISTS)) {
+                return 0;
+            }
+            return -1;
+        }
+
+        return 0;
+    }
+
+    // Returns 0 on success, non-zero on failure.
+    int file_flush(FILE *fp) {
+        if (fp == NULL) return -1;
+        return fflush(fp);
     }
 
     // Writes a buffer to the file with 64-bit safety and handles partial writes.
