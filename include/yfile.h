@@ -78,7 +78,7 @@ extern "C" {
      * @return FILE pointer on success, NULL on failure.
      */
     FILE *file_open_utf8(const char *filename, const char *mode) {
-        if (!filename || !mode || !mode[0] || (strchr(mode, 'r') && file_accessible(filename))) return NULL;
+        if (!filename || !mode || !mode[0]) return NULL;
         int wlen_path = MultiByteToWideChar(CP_UTF8, 0, filename, -1, NULL, 0);
         if (!wlen_path) return NULL;
         wchar_t *wpath = (wchar_t *)malloc(sizeof(wchar_t) * wlen_path);
